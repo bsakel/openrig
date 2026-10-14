@@ -15,6 +15,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CLI_DIR="$REPO_ROOT/packages/cli"
 cd "$REPO_ROOT"
 
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ "$NODE_MAJOR" != "22" ] && [ "$NODE_MAJOR" != "24" ]; then
+  echo "local-install: OpenRig needs Node 22 or 24 (found $(node -v 2>/dev/null || echo none), npm $(npm -v 2>/dev/null || echo none))" >&2
+  exit 1
+fi
+
 if [ "${1:-}" = "--update" ]; then
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     echo "local-install: commit or stash your changes before --update" >&2

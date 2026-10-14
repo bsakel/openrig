@@ -30,15 +30,14 @@ const base = {
 afterEach(() => { vi.unstubAllEnvs(); });
 
 describe("--tui launch switch", () => {
-  it("is off by default and byte-identical to the RPC command", () => {
+  it("is on by default for Pi", () => {
     vi.stubEnv("OPENRIG_PI_TUI", "");
-    expect(buildPiRunnerCommand(base)).not.toContain("--tui");
+    expect(buildPiRunnerCommand(base)).toBe(`${buildPiRunnerCommand({ ...base, tui: false })} --tui`);
   });
 
-  it("follows OPENRIG_PI_TUI=1 for Pi, and an explicit opt overrides it", () => {
-    vi.stubEnv("OPENRIG_PI_TUI", "1");
-    expect(buildPiRunnerCommand(base)).toBe(`${buildPiRunnerCommand({ ...base, tui: false })} --tui`);
-    vi.stubEnv("OPENRIG_PI_TUI", "");
+  it("OPENRIG_PI_TUI=0 restores the RPC command byte for byte, and an explicit opt overrides it", () => {
+    vi.stubEnv("OPENRIG_PI_TUI", "0");
+    expect(buildPiRunnerCommand(base)).not.toContain("--tui");
     expect(buildPiRunnerCommand({ ...base, tui: true }).endsWith(" --tui")).toBe(true);
   });
 

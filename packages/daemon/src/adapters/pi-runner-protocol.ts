@@ -265,7 +265,8 @@ export interface PiRunnerLaunchOpts {
   /** Launch-attempt scope stamped into every runner sidecar write. */
   launchId: string;
   /** Local fork: Pi only — run the native Pi TUI with the OpenRig extension
-   *  instead of RPC. Defaults to the daemon's OPENRIG_PI_TUI=1 switch. */
+   *  instead of RPC. On by default; OPENRIG_PI_TUI=0 in the daemon's
+   *  environment falls back to the RPC runner. */
   tui?: boolean;
 }
 
@@ -296,7 +297,7 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     parts.push("--usage-facts");
     if (opts.openRouterCharge) parts.push("--openrouter-charge");
   }
-  if (opts.runtime !== "omp" && (opts.tui ?? process.env.OPENRIG_PI_TUI === "1")) {
+  if (opts.runtime !== "omp" && (opts.tui ?? process.env.OPENRIG_PI_TUI !== "0")) {
     parts.push("--tui");
   }
   return parts.join(" ");

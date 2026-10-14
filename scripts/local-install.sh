@@ -7,8 +7,8 @@
 #   bash scripts/local-install.sh            # build + install the current checkout
 #   bash scripts/local-install.sh --update   # first fetch the fork branch and rebase it on upstream main
 #
-# Native Pi TUI seats need OPENRIG_PI_TUI=1 in the shell that starts the
-# daemon (e.g. `export OPENRIG_PI_TUI=1` in ~/.bashrc).
+# Pi seats run the native Pi TUI by default; OPENRIG_PI_TUI=0 in the shell
+# that starts the daemon falls back to the RPC runner.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,6 +52,6 @@ rm -f "$CLI_DIR/$TARBALL"
 echo "=== start ==="
 rig daemon start
 rig --version || true
-if [ "${OPENRIG_PI_TUI:-}" != "1" ]; then
-  echo "local-install: note — OPENRIG_PI_TUI is not 1 in this shell, so Pi seats launch in RPC mode."
+if [ "${OPENRIG_PI_TUI:-}" = "0" ]; then
+  echo "local-install: note — OPENRIG_PI_TUI=0 in this shell, so Pi seats launch in RPC mode."
 fi

@@ -3,6 +3,9 @@
 // bridge. No live pi.
 
 import { afterEach, describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import { parseRunnerArgs } from "../src/adapters/pi-runner.js";
 import { buildPiChildArgs, buildPiRunnerCommand, parsePiRunnerState } from "../src/adapters/pi-runner-protocol.js";
 import { buildPiTuiChildArgs, piTuiExitState } from "../src/adapters/pi-tui-launch.js";
@@ -94,6 +97,7 @@ function fakeBridgeIo(prior: string | null = null) {
     io: {
       readFile: (p: string) => files.get(p) ?? null,
       writeFile: (p: string, c: string) => { files.set(p, c); },
+      exists: (p: string) => files.has(p),
       post: (path: string, payload: Record<string, unknown>) => { posts.push({ path, payload }); },
       now: () => NOW,
     },
@@ -111,6 +115,46 @@ describe("createPiTuiBridge", () => {
       eventFamily: "session_identity", sessionName: SESSION, nodeId: "node-1", runtime: "pi", generation: "gen-1",
       hookEvent: "SessionStart", sessionId: "sid", sessionFile: SESSION_FILE, occurredAt: NOW,
     } }]);
+  });
+
+  it("publishes the launch's first session at once, even before Pi writes its file", () => {
+    const fake = fakeBridgeIo();
+    createPiTuiBridge(control, fake.io).sessionStart(SESSION_FILE, "sid");
+    expect(JSON.parse(fake.files.get(STATE_PATH)!).sessionFile).toBe(SESSION_FILE);
+    expect(fake.posts).toHaveLength(1);
+  });
+
+  it("holds a /new switch until Pi has written the new file, then publishes it after a turn", () => {
+    const fake = fakeBridgeIo();
+    fake.files.set(SESSION_FILE, "{}");
+    const bridge = createPiTuiBridge(control, fake.io);
+    bridge.sessionStart(SESSION_FILE, "sid");
+    const next = SESSION_FILE.replace("0197", "0198");
+    bridge.sessionStart(next, "sid-2");
+    bridge.flushPending();
+    expect(JSON.parse(fake.files.get(STATE_PATH)!).sessionFile).toBe(SESSION_FILE);
+    expect(fake.posts).toHaveLength(1);
+    fake.files.set(next, "{}");
+    bridge.flushPending();
+    expect(JSON.parse(fake.files.get(STATE_PATH)!)).toMatchObject({ sessionFile: next, sessionId: "sid-2" });
+    expect(fake.posts.at(-1)!.payload).toMatchObject({ eventFamily: "session_identity", sessionFile: next, sessionId: "sid-2" });
+    bridge.flushPending();
+    expect(fake.posts).toHaveLength(2);
+  });
+
+  it("publishes a switch to an existing session immediately, dropping a stale pending one", () => {
+    const fake = fakeBridgeIo();
+    const resumed = "/state/pi/devpi-a@some-rig/sessions/older.jsonl";
+    fake.files.set(SESSION_FILE, "{}");
+    fake.files.set(resumed, "{}");
+    const bridge = createPiTuiBridge(control, fake.io);
+    bridge.sessionStart(SESSION_FILE, "sid");
+    bridge.sessionStart("/state/pi/devpi-a@some-rig/sessions/new.jsonl", "sid-new");
+    bridge.sessionStart(resumed, "sid-old");
+    expect(JSON.parse(fake.files.get(STATE_PATH)!).sessionFile).toBe(resumed);
+    fake.files.set("/state/pi/devpi-a@some-rig/sessions/new.jsonl", "{}");
+    bridge.flushPending();
+    expect(JSON.parse(fake.files.get(STATE_PATH)!).sessionFile).toBe(resumed);
   });
 
   it("posts activity in the runner's payload shape", () => {
@@ -133,10 +177,33 @@ describe("parsePiTuiControl", () => {
 });
 
 describe("openrigPiExtension", () => {
+  const SLOT = Symbol.for("openrig.pi-tui.bridge");
+  afterEach(() => { delete (globalThis as Record<symbol, unknown>)[SLOT]; });
+
   it("is inert outside an OpenRig TUI seat", () => {
     vi.stubEnv(PI_TUI_CONTROL_ENV, "");
     const pi = { on: vi.fn() };
     openrigPiExtension(pi);
     expect(pi.on).not.toHaveBeenCalled();
+  });
+
+  it("stays active when Pi re-runs the factory after a session replacement", () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "pi-tui-"));
+    try {
+      const controlPath = nodePath.join(dir, "tui-control.json");
+      fs.writeFileSync(controlPath, JSON.stringify({ ...control, endpoint: null, runnerStatePath: nodePath.join(dir, "runner-state.json") }));
+      vi.stubEnv(PI_TUI_CONTROL_ENV, controlPath);
+      const first = { on: vi.fn() };
+      openrigPiExtension(first);
+      // The locator leaves the environment Pi's tools inherit…
+      expect(process.env[PI_TUI_CONTROL_ENV]).toBeUndefined();
+      // …and a second factory run (Pi's /new runtime replacement) still binds.
+      const second = { on: vi.fn() };
+      openrigPiExtension(second);
+      expect(second.on.mock.calls.map(([event]) => event)).toEqual(first.on.mock.calls.map(([event]) => event));
+      expect(second.on.mock.calls.map(([event]) => event)).toContain("session_start");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

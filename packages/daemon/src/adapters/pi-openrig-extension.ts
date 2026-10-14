@@ -27,6 +27,7 @@ export interface PiTuiControl {
 export interface PiTuiBridgeIo {
   readFile(path: string): string | null;
   writeFile(path: string, content: string): void;
+  exists(path: string): boolean;
   /** Fire-and-forget POST of a JSON payload to a daemon path. */
   post(path: string, payload: Record<string, unknown>): void;
   now(): string;
@@ -62,33 +63,59 @@ export function createPiTuiBridge(control: PiTuiControl, io: PiTuiBridgeIo) {
     }
   };
 
+  // A session switched to inside the TUI (/new, /fork, /resume) whose file Pi
+  // has not written yet; published once the file exists.
+  let pending: { sessionFile: string; sessionId: string | undefined } | null = null;
+  let published = false;
+
+  const publish = (sessionFile: string | undefined, sessionId: string | undefined): void => {
+    published = true;
+    const now = io.now();
+    try {
+      io.writeFile(control.runnerStatePath, JSON.stringify({
+        ready: true,
+        launchId: control.launchId,
+        sessionFile,
+        sessionId,
+        lastEntryId: priorLastEntryId(),
+        updatedAt: now,
+      }));
+    } catch { /* the adapter times out honestly without a ready sidecar */ }
+    io.post("/api/activity/hooks", {
+      eventFamily: "session_identity",
+      sessionName: control.sessionName,
+      nodeId: control.nodeId,
+      runtime: "pi",
+      generation: control.generation,
+      hookEvent: "SessionStart",
+      sessionId: sessionId ?? "unknown",
+      sessionFile: sessionFile ?? null,
+      occurredAt: now,
+    });
+  };
+
   return {
     /** Every session_start (startup, resume, fork, /new, …) re-publishes the
      *  current session file — the sidecar and the daemon's resume token follow
-     *  whatever session the TUI is on. */
+     *  whatever session the TUI is on. The launch's first publication is
+     *  immediate (readiness waits on it); a later switch waits until Pi has
+     *  written the new file, so a restore never targets a file that is not there. */
     sessionStart(sessionFile: string | undefined, sessionId: string | undefined): void {
-      const now = io.now();
-      try {
-        io.writeFile(control.runnerStatePath, JSON.stringify({
-          ready: true,
-          launchId: control.launchId,
-          sessionFile,
-          sessionId,
-          lastEntryId: priorLastEntryId(),
-          updatedAt: now,
-        }));
-      } catch { /* the adapter times out honestly without a ready sidecar */ }
-      io.post("/api/activity/hooks", {
-        eventFamily: "session_identity",
-        sessionName: control.sessionName,
-        nodeId: control.nodeId,
-        runtime: "pi",
-        generation: control.generation,
-        hookEvent: "SessionStart",
-        sessionId: sessionId ?? "unknown",
-        sessionFile: sessionFile ?? null,
-        occurredAt: now,
-      });
+      if (published && sessionFile && !io.exists(sessionFile)) {
+        pending = { sessionFile, sessionId };
+        return;
+      }
+      pending = null;
+      publish(sessionFile, sessionId);
+    },
+
+    /** Publish a pending switch whose file now exists (called after each turn). */
+    flushPending(): void {
+      if (pending && io.exists(pending.sessionFile)) {
+        const next = pending;
+        pending = null;
+        publish(next.sessionFile, next.sessionId);
+      }
     },
 
     activity(hookEvent: string, subtype: string | null): void {
@@ -111,6 +138,7 @@ function nodeIo(control: PiTuiControl): PiTuiBridgeIo {
       try { return fs.readFileSync(path, "utf8"); } catch { return null; }
     },
     writeFile: (path, content) => fs.writeFileSync(path, content),
+    exists: (path) => fs.existsSync(path),
     post: (path, payload) => {
       const endpoint = control.endpoint;
       if (!endpoint || typeof fetch !== "function") return;
@@ -127,18 +155,36 @@ function nodeIo(control: PiTuiControl): PiTuiBridgeIo {
   };
 }
 
-// Pi's ExtensionAPI is not a dependency of the daemon, so it stays untyped here.
-export default function openrigPiExtension(pi: any): void {
+type PiTuiBridge = ReturnType<typeof createPiTuiBridge>;
+const BRIDGE_SLOT = Symbol.for("openrig.pi-tui.bridge");
+
+/** One bridge per Pi process. Pi re-runs extension factories when it replaces
+ *  the session runtime (/new, /fork, /resume, reload), after the control
+ *  locator has left the environment, so the bridge and its publication state
+ *  live process-wide rather than per factory call. */
+function processBridge(): { control: PiTuiControl; bridge: PiTuiBridge } | null {
+  const slot = globalThis as Record<symbol, { control: PiTuiControl; bridge: PiTuiBridge } | undefined>;
+  const existing = slot[BRIDGE_SLOT];
+  if (existing) return existing;
   const controlPath = process.env[PI_TUI_CONTROL_ENV];
   // Outside an OpenRig TUI seat this extension does nothing.
-  if (!controlPath) return;
+  if (!controlPath) return null;
   // Keep the locator out of the environment Pi's tools inherit.
   delete process.env[PI_TUI_CONTROL_ENV];
   let raw: string | null = null;
   try { raw = fs.readFileSync(controlPath, "utf8"); } catch { /* unreadable → inert */ }
   const control = parsePiTuiControl(raw);
-  if (!control) return;
-  const bridge = createPiTuiBridge(control, nodeIo(control));
+  if (!control) return null;
+  const created = { control, bridge: createPiTuiBridge(control, nodeIo(control)) };
+  slot[BRIDGE_SLOT] = created;
+  return created;
+}
+
+// Pi's ExtensionAPI is not a dependency of the daemon, so it stays untyped here.
+export default function openrigPiExtension(pi: any): void {
+  const state = processBridge();
+  if (!state) return;
+  const { control, bridge } = state;
 
   pi.on("session_start", (_event: any, ctx: any) => {
     bridge.sessionStart(ctx.sessionManager?.getSessionFile?.(), ctx.sessionManager?.getSessionId?.());
@@ -148,6 +194,9 @@ export default function openrigPiExtension(pi: any): void {
   pi.on("tool_execution_start", (event: any) => {
     bridge.activity("PreToolUse", typeof event?.toolName === "string" ? event.toolName : "tool");
   });
-  pi.on("agent_end", () => bridge.activity("Stop", "agent_end"));
+  pi.on("agent_end", () => {
+    bridge.flushPending();
+    bridge.activity("Stop", "agent_end");
+  });
   pi.on("session_before_compact", () => { bridge.activity("active", "compaction"); });
 }

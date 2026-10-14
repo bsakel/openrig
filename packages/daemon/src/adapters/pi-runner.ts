@@ -769,8 +769,10 @@ export class RunnerCore {
 
 // ── CLI entry ────────────────────────────────────────────────────────────────
 
-interface RunnerArgs {
+export interface RunnerArgs {
   runtime?: RunnerRuntime;
+  /** Local fork: host the native Pi TUI with the OpenRig extension (pi-tui-launch.ts). */
+  tui?: boolean;
   sessionName: string;
   stateRoot: string;
   cwd: string;
@@ -809,6 +811,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
       case "--openrouter-charge": args.openRouterCharge = true; break;
+      case "--tui": args.tui = true; break;
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -832,10 +835,11 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
+  if (args.tui && args.runtime === "omp") throw new Error("--tui is Pi only");
   return args as RunnerArgs;
 }
 
-function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; token: string } | null {
+export function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; token: string } | null {
   let baseUrl = env.OPENRIG_URL?.trim() || null;
   let token = env.OPENRIG_ACTIVITY_HOOK_TOKEN?.trim() || null;
   if (!baseUrl && env.OPENRIG_PORT) {
@@ -965,6 +969,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.error(`${PI_RUNNER_ERROR_MARKER} ${(err as Error).message}`);
     process.exitCode = 2;
     return;
+  }
+  if (args.tui) {
+    const { runPiTui } = await import("./pi-tui-launch.js");
+    return runPiTui(args);
   }
 
   const runtime = args.runtime ?? "pi";
